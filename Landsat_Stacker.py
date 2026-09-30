@@ -174,7 +174,6 @@ def create_stack(band_files, output_file, ref_info):
     print("\nCreating stacked image...\n")
 
     if USE_RASTERIO:
-        # Build profile from scratch to avoid carrying GeoTIFF-specific parameters (tiled, blocksize, compress)
         profile = {
             "driver": "HFA",  # ERDAS Imagine format (.img)
             "count": 7,
@@ -193,6 +192,7 @@ def create_stack(band_files, output_file, ref_info):
                     data = src.read(1)
                     dst.write(data, b)
 
+                dst.update_tags(b, STATISTICS_EXCLUDEDVALUES="0")
                 print(f"[OK] B{b} -> Output Band {b}")
 
             # Note: STATISTICS=YES requests GDAL HFA driver to construct statistic/histogram headers,
@@ -241,6 +241,7 @@ def create_stack(band_files, output_file, ref_info):
                 out_band.SetNoDataValue(ref_info["nodata"])
 
             out_band.WriteArray(data)
+            out_band.SetMetadataItem("STATISTICS_EXCLUDEDVALUES", "0")
             out_band.FlushCache()
 
             # Note: ComputeStatistics(False) explicitly computes and records exact stats per band
