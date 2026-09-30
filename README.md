@@ -7,7 +7,7 @@ A lightweight, single-file Python tool to validate and stack Landsat optical ban
 ## 📁 Project Structure
 
 ```text
-Landsat_Stacker/
+landsat-stacker-/
 │
 ├── Landsat_Stacker.py
 ├── README.md
@@ -30,24 +30,18 @@ Landsat_Stacker/
 ## ⚙️ Prerequisites & Installation
 
 - **Python 3.11+**
-- **GDAL** (Python bindings)
+- **Rasterio** or **GDAL**
 
 ### Installation on Windows 11
 
 Open **Command Prompt** or **PowerShell** and run:
 
 ```cmd
-pip install GDAL numpy
+pip install rasterio numpy
 ```
 
-> **Note:** If `pip install GDAL` gives a build error on Windows due to compiler dependencies, run:
-> ```cmd
-> pip install --only-binary :all: GDAL
-> ```
-> Or install via Conda:
-> ```cmd
-> conda install -c conda-forge gdal
-> ```
+> **Why `rasterio`?**
+> Standard `pip install GDAL` on Windows requires C++ compiler headers. `rasterio` distributes pre-compiled Windows wheel binaries with GDAL built-in, installing error-free in seconds. The script supports both libraries seamlessly.
 
 ---
 
@@ -146,7 +140,7 @@ output/Landsat_Stacked.img
 
 ## 🛠️ Software Compatibility
 
-The output `.img` file is created using GDAL's native `HFA` driver, ensuring full compatibility with:
+The output `.img` file is created using the native GDAL `HFA` driver, ensuring full compatibility with:
 - **ERDAS Imagine**
 - **ArcGIS Pro / ArcMap**
 - **QGIS**
