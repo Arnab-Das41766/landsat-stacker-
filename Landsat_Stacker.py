@@ -165,23 +165,32 @@ def validate_bands(band_files):
 def scale_band_to_8bit(data_array, nodata_val):
     """
     Scales 16-bit raw Landsat surface reflectance values to 8-bit (0-255)
-    using 2% and 98% percentile land contrast stretch for INSTANT vivid true-color rendering.
+    using robust contrast stretch for INSTANT vivid true-color rendering.
+    Filters out background nodata and saturated cloud pixels so land features remain bright and colorful.
     """
-    nodata_mask = data_array == nodata_val
+    nodata_mask = (data_array == nodata_val) | (data_array == 0)
     valid_pixels = data_array[~nodata_mask]
 
     if not np.any(valid_pixels):
         return np.zeros_like(data_array, dtype=np.uint8)
 
-    # Calculate 2nd and 98th percentiles of valid land pixels
-    p2, p98 = np.percentile(valid_pixels, [2, 98])
+    if data_array.dtype == np.uint8:
+        return data_array
 
-    if p98 == p2:
-        scaled = np.zeros_like(data_array, dtype=np.float32)
-    else:
-        # Scale to 1..255 (reserve 0 for NoData background)
-        scaled = ((data_array.astype(np.float32) - p2) / (p98 - p2)) * 254.0 + 1.0
+    # Filter out saturated cloud pixels (DN >= 22000 in Landsat C2 L2 SR) for contrast upper percentile calculation
+    land_mask = ~nodata_mask & (data_array < 22000)
+    land_pixels = data_array[land_mask]
 
+    if not np.any(land_pixels):
+        land_pixels = valid_pixels
+
+    p2 = float(np.percentile(land_pixels, 2))
+    p98 = float(np.percentile(land_pixels, 98))
+
+    if p98 <= p2:
+        p98 = p2 + 1.0
+
+    scaled = ((data_array.astype(np.float32) - p2) / (p98 - p2)) * 254.0 + 1.0
     scaled = np.clip(scaled, 1, 255)
     scaled[nodata_mask] = 0
 
@@ -265,7 +274,7 @@ def create_rgb_preview(band_files, preview_file, ref_info):
 
 
 
-def create_stack(band_files, output_file, ref_info, scale_to_8bit=True):
+def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
     """
     Creates an ERDAS Imagine .img stacked raster from bands 1 to 7 using HFA driver.
 
@@ -308,8 +317,11 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=True):
                 print(f"[OK] B{b} -> Output Band {b}")
 
             print("\nComputing band statistics...")
-            for b in range(1, 8):
-                dst.statistics(b, approx=False)
+            try:
+                dst.stats(indexes=list(range(1, 8)), approx=False)
+            except Exception:
+                for b in range(1, 8):
+                    dst.statistics(b, approx=False)
 
             print("Building overviews...")
             dst.build_overviews([2, 4, 8, 16], Resampling.average)
@@ -505,10 +517,13 @@ def main():
     # Prompt user if output file already exists
     if os.path.exists(output_file):
         print(f"Existing output found.\n")
-        try:
-            response = input("Overwrite? (y/n): ").strip().lower()
-        except EOFError:
+        if not sys.stdin.isatty() or "--force" in sys.argv or "-y" in sys.argv:
             response = "y"
+        else:
+            try:
+                response = input("Overwrite? (y/n): ").strip().lower()
+            except EOFError:
+                response = "y"
         if response not in ["y", "yes"]:
             print("Operation cancelled by user.")
             sys.exit(0)
@@ -538,7 +553,7 @@ def main():
 
     ref_info = validate_bands(band_files)
 
-    create_stack(band_files, output_file, ref_info, scale_to_8bit=True)
+    create_stack(band_files, output_file, ref_info, scale_to_8bit=False)
 
     verify_output(output_file, ref_info)
 
