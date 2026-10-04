@@ -1,0 +1,12 @@
+# Ignore input rasters and generated output files
+input/*
+!input/.gitkeep
+
+output/*
+!output/.gitkeep
+
+# Ignore temporary files & Python cache
+__pycache__/
+*.pyc
+*.aux.xml
+.DS_Store
