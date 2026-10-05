@@ -1,0 +1,12 @@
+satelite i wanna use this in future 
+Landsat 8/9
+Sentinel-2
+Sentinel-1
+Resourcesat-2/2A
+Cartosat
+MODIS
+Sentinel-3
+PlanetScope
+WorldView
+PRISMA
+EnMAP

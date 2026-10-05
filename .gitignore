@@ -1,12 +1,32 @@
-# Ignore input rasters and generated output files
+﻿# Ignore input rasters, processing staging, and generated outputs
 input/*
 !input/.gitkeep
+
+processing/*
+!processing/.gitkeep
 
 output/*
 !output/.gitkeep
 
-# Ignore temporary files & Python cache
+# Raw raster and archive formats
+*.TIF
+*.tif
+*.tiff
+*.img
+*.rrd
+*.ige
+*.ovr
+*.aux
+*.aux.xml
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.zip
+*.7z
+
+# Python cache & OS artifacts
 __pycache__/
 *.pyc
-*.aux.xml
 .DS_Store
+Thumbs.db

@@ -1,6 +1,10 @@
-import os
+﻿import os
 import sys
 import re
+import shutil
+import zipfile
+import tarfile
+import subprocess
 import numpy as np
 
 # Dual support: Try rasterio first (pre-compiled binaries for Windows), fallback to osgeo.gdal
@@ -13,7 +17,6 @@ try:
     USE_RASTERIO = True
 except ImportError:
     try:
-        # pyrefly: ignore [missing-import]
         from osgeo import gdal, osr
         gdal.UseExceptions()
         USE_GDAL = True
@@ -23,19 +26,191 @@ except ImportError:
         sys.exit(1)
 
 
+def extract_archive(archive_path, target_dir):
+    """
+    Extracts a compressed archive (.rar, .zip, .tar, .tar.gz, .tgz, .7z) into target_dir.
+    Supports WinRAR / UnRAR on Windows, built-in tarfile/zipfile, and Windows tar.exe.
+    """
+    lower_name = archive_path.lower()
+    os.makedirs(target_dir, exist_ok=True)
+
+    # 1. ZIP Archives
+    if lower_name.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(target_dir)
+            return True
+        except Exception as e:
+            print(f"  [Notice] Python zipfile: {e}. Trying system tools...")
+
+    # 2. TAR Archives (.tar, .tar.gz, .tgz, .tar.bz2)
+    if lower_name.endswith((".tar.gz", ".tgz", ".tar", ".tar.bz2")):
+        try:
+            with tarfile.open(archive_path, "r:*") as tf:
+                tf.extractall(target_dir)
+            return True
+        except Exception as e:
+            print(f"  [Notice] Python tarfile: {e}. Trying system tools...")
+
+    # 3. RAR Archives (.rar)
+    if lower_name.endswith(".rar"):
+        unrar_candidates = [
+            r"C:\Program Files\WinRAR\UnRAR.exe",
+            r"C:\Program Files\WinRAR\WinRAR.exe",
+            r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
+            "unrar",
+            "winrar"
+        ]
+        target_dir_slash = target_dir if target_dir.endswith(os.sep) else target_dir + os.sep
+
+        for unrar_exe in unrar_candidates:
+            if os.path.exists(unrar_exe) or shutil.which(unrar_exe):
+                try:
+                    cmd = [unrar_exe, "x", "-y", "-o+", archive_path, target_dir_slash]
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    if res.returncode == 0:
+                        return True
+                except Exception:
+                    pass
+
+        try:
+            import rarfile
+            with rarfile.RarFile(archive_path, "r") as rf:
+                rf.extractall(target_dir)
+            return True
+        except Exception:
+            pass
+
+    # 4. Fallback: Windows built-in tar.exe
+    try:
+        res = subprocess.run(["tar", "-xf", archive_path, "-C", target_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+
+    # 5. Fallback: 7z if in PATH or standard Program Files
+    seven_z = shutil.which("7z") or (r"C:\Program Files\7-Zip\7z.exe" if os.path.exists(r"C:\Program Files\7-Zip\7z.exe") else None)
+    if seven_z:
+        try:
+            res = subprocess.run([seven_z, "x", "-y", f"-o{target_dir}", archive_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    # 6. Fallback: PowerShell Expand-Archive (for zip)
+    if lower_name.endswith(".zip"):
+        try:
+            ps_cmd = f"Expand-Archive -LiteralPath '{archive_path}' -DestinationPath '{target_dir}' -Force"
+            res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if res.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def prepare_processing_folder(input_dir, processing_dir):
+    """
+    Scans input_dir for Landsat data. If a compressed archive (.rar, .zip, .tar, etc.)
+    is found, it automatically extracts it and copies ONLY the required B1 through B7 TIF files
+    into the processing/ folder. If raw TIF files are already in input/, it copies them directly.
+    """
+    print("========================================")
+    print("   PREPARING & EXTRACTING INPUT DATA   ")
+    print("========================================\n")
+
+    if not os.path.exists(input_dir):
+        os.makedirs(input_dir, exist_ok=True)
+
+    # Recreate clean processing directory
+    if os.path.exists(processing_dir):
+        try:
+            shutil.rmtree(processing_dir, ignore_errors=True)
+        except Exception:
+            pass
+    os.makedirs(processing_dir, exist_ok=True)
+
+    archive_exts = (".rar", ".zip", ".tar.gz", ".tgz", ".tar", ".tar.bz2", ".7z")
+    input_items = os.listdir(input_dir)
+    archive_files = [f for f in input_items if f.lower().endswith(archive_exts)]
+
+    temp_extract_dir = os.path.join(processing_dir, "_temp_extract")
+
+    if archive_files:
+        os.makedirs(temp_extract_dir, exist_ok=True)
+        for archive_name in archive_files:
+            archive_path = os.path.join(input_dir, archive_name)
+            print(f"Detected archive: {archive_name}")
+            print(f"Extracting '{archive_name}'...")
+            success = extract_archive(archive_path, temp_extract_dir)
+            if success:
+                print(f"[OK] Extracted: {archive_name}\n")
+            else:
+                print(f"[WARNING] Could not extract '{archive_name}'. Checking if raw band files exist...\n")
+    else:
+        print("No compressed archive found in input/. Checking for raw band files...\n")
+
+    # Pattern to identify Landsat B1 through B7 band files
+    band_pattern = re.compile(r"(?:^|[\-_])B([1-7])\.(?:tif|tiff)$", re.IGNORECASE)
+
+    search_dirs = []
+    if os.path.exists(temp_extract_dir):
+        search_dirs.append(temp_extract_dir)
+    search_dirs.append(input_dir)
+
+    found_bands = {}
+    mtl_file = None
+
+    for s_dir in search_dirs:
+        for root, _, files in os.walk(s_dir):
+            for fname in files:
+                match = band_pattern.search(fname)
+                if match:
+                    b_num = int(match.group(1))
+                    if b_num not in found_bands:
+                        found_bands[b_num] = os.path.join(root, fname)
+                if fname.upper().endswith("_MTL.TXT") and not mtl_file:
+                    mtl_file = os.path.join(root, fname)
+
+    missing_bands = [b for b in range(1, 8) if b not in found_bands]
+    if missing_bands:
+        print(f"ERROR: Missing Landsat band(s): {', '.join(f'B{b}' for b in missing_bands)} in input data.")
+        print(f"Please place your Landsat .rar, .tar, .zip archive or B1-B7 .TIF files into:\n'{input_dir}'")
+        if os.path.exists(temp_extract_dir):
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+        sys.exit(1)
+
+    print("Copying required Landsat bands (B1–B7) into processing/ folder:")
+    for b in range(1, 8):
+        src_path = found_bands[b]
+        dst_path = os.path.join(processing_dir, os.path.basename(src_path))
+        shutil.copy2(src_path, dst_path)
+        print(f"  [OK] B{b} -> {os.path.basename(dst_path)}")
+
+    if mtl_file:
+        shutil.copy2(mtl_file, os.path.join(processing_dir, os.path.basename(mtl_file)))
+        print(f"  [OK] Metadata -> {os.path.basename(mtl_file)}")
+
+    if os.path.exists(temp_extract_dir):
+        shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+    print("\n[OK] Processing folder prepared successfully.\n")
+
+
 def find_bands(input_dir):
     """
     Scans input_dir for Landsat B1 through B7 TIF files.
     Returns a dictionary mapping band number (1..7) to file path.
     """
     if not os.path.exists(input_dir):
-        print(f"ERROR: Input folder '{input_dir}' does not exist.")
+        print(f"ERROR: Folder '{input_dir}' does not exist.")
         sys.exit(1)
 
     band_files = {}
 
-    # Pattern matching filenames ending in _B1.tif, _B2.tif, etc. (case insensitive)
-    # Excludes QA_PIXEL, B8, B9, B10, B11, etc.
     band_pattern = re.compile(r"(?:^|[\-_])B([1-7])\.(?:tif|tiff)$", re.IGNORECASE)
 
     for filename in sorted(os.listdir(input_dir)):
@@ -45,12 +220,11 @@ def find_bands(input_dir):
             full_path = os.path.join(input_dir, filename)
             band_files[band_num] = full_path
 
-    # Check that all 7 bands exist
     for b in range(1, 8):
         if b in band_files:
             print(f"[OK] B{b} found")
         else:
-            print(f"\nERROR: B{b} was not found in the input folder.")
+            print(f"\nERROR: B{b} was not found in processing folder.")
             sys.exit(1)
 
     return band_files
@@ -165,83 +339,145 @@ def validate_bands(band_files):
 
 def scale_band_to_8bit(data_array, nodata_val):
     """
-    Scales 16-bit raw Landsat surface reflectance values to 8-bit (0-255)
-    using 2%-98% percentile stretch and gamma correction for vivid natural true-color rendering.
+    Scales 16-bit raw Landsat surface reflectance values to 8-bit (0-255).
+    Kept for backward compatibility.
     """
-    nodata_mask = (data_array == nodata_val) | (data_array == 0)
-    valid_mask = ~nodata_mask
+    nodata_mask = data_array == nodata_val
+    valid_pixels = data_array[~nodata_mask]
 
-    if not np.any(valid_mask):
+    if not np.any(valid_pixels):
         return np.zeros_like(data_array, dtype=np.uint8)
 
-    if data_array.dtype == np.uint8:
-        return data_array
+    p2, p98 = np.percentile(valid_pixels, [2, 98])
 
-    # Convert Landsat C2 L2 DN to Surface Reflectance
-    sr = np.maximum(0, (data_array.astype(np.float32) * 0.0000275) - 0.2)
-    valid_sr = sr[valid_mask]
+    if p98 == p2:
+        scaled = np.zeros_like(data_array, dtype=np.float32)
+    else:
+        scaled = ((data_array.astype(np.float32) - p2) / (p98 - p2)) * 254.0 + 1.0
 
-    p2, p98 = np.percentile(valid_sr, [2, 98])
-    if p98 <= p2:
-        p98 = p2 + 1.0
+    scaled = np.clip(scaled, 1, 255)
+    scaled[nodata_mask] = 0
 
-    stretched = np.clip((sr - p2) / (p98 - p2), 0, 1)
-    gamma_corrected = np.power(stretched, 0.45)
-    gamma_corrected[nodata_mask] = 0
-
-    return (gamma_corrected * 255.0).astype(np.uint8)
+    return scaled.astype(np.uint8)
 
 
-def create_multi_composites(band_files, output_dir, ref_info):
+def stretch_band_erdas_style(arr, max_refl=0.28):
     """
-    V2 Feature: Generates 4 standard remote sensing multi-spectral PNG previews:
-      1. True Color (RGB 4-3-2): Natural human-eye view.
-      2. Standard Infrared FCC (RGB 5-4-3): Bright red vegetation.
-      3. Agriculture & Crop Moisture (RGB 6-5-2): Soil and crop health.
-      4. Urban & Built-Up (RGB 7-6-4): Infrastructure and building density.
+    Applies ERDAS Imagine-style natural surface reflectance stretch:
+    Maps 0.0% to 28-52% ground reflectance with gamma mid-tone compensation.
+    Eliminates cloud-induced darkening and matches ERDAS Imagine display fidelity.
     """
-    print("\nGenerating Multi-Composite PNG Previews...")
+    mask = (arr == 0)
+    # Check if Landsat Level-2 Surface Reflectance (DN offset ~7273)
+    if np.median(arr[arr > 0]) > 5000:
+        sr = arr * 0.0000275 - 0.2
+        sr = np.clip(sr, 0.0, max_refl)
+        norm = sr / max_refl
+        norm = norm ** (1.0 / 1.35)
+        out = (norm * 254.0 + 1.0)
+    else:
+        # Fallback for Top-of-Atmosphere / raw DN
+        valid = arr[arr > 0]
+        p2 = np.percentile(valid, 2)
+        p_high = np.percentile(valid, 85)
+        if p_high <= p2:
+            p_high = p2 + 1.0
+        norm = np.clip((arr.astype(np.float32) - p2) / (p_high - p2), 0.0, 1.0) ** (1.0 / 1.25)
+        out = (norm * 254.0 + 1.0)
+
+    out[mask] = 0
+    return out.astype(np.uint8)
+
+
+def create_all_previews(output_file, output_dir):
+    """
+    Generates 4 full-color ERDAS-quality PNG previews directly from the stacked raster:
+      1. True Color (Bands 4-3-2)
+      2. False Color NIR / FCC (Bands 5-4-3)
+      3. Agriculture (Bands 6-5-2)
+      4. Urban / Geology (Bands 7-6-4)
+    """
+    print("\nGenerating ERDAS-Quality Full-Color Preview Images...")
 
     composites = {
-        "Landsat_TrueColor_Preview.png": (4, 3, 2, "True Color (RGB 4-3-2)"),
-        "Landsat_FalseColor_NIR_Preview.png": (5, 4, 3, "Standard Infrared FCC (RGB 5-4-3)"),
-        "Landsat_Agriculture_Preview.png": (6, 5, 2, "Agriculture (RGB 6-5-2)"),
-        "Landsat_Urban_Preview.png": (7, 6, 4, "Urban & Built-Up (RGB 7-6-4)")
+        "Landsat_TrueColor_Preview.png": (4, 3, 2, "True Color (Bands 4-3-2)"),
+        "Landsat_FalseColor_NIR_Preview.png": (5, 4, 3, "Standard False Color / FCC (Bands 5-4-3)"),
+        "Landsat_Agriculture_Preview.png": (6, 5, 2, "Agriculture (Bands 6-5-2)"),
+        "Landsat_Urban_Preview.png": (7, 6, 4, "Urban / Geology (Bands 7-6-4)")
     }
 
-    for filename, (r_band, g_band, b_band, desc) in composites.items():
-        preview_file = os.path.join(output_dir, filename)
+    # Custom ground reflectance ceilings per wavelength for optimal color balance
+    band_refl_limits = {
+        2: 0.28,  # Blue
+        3: 0.28,  # Green
+        4: 0.28,  # Red
+        5: 0.52,  # NIR (high vegetation reflectance)
+        6: 0.45,  # SWIR-1
+        7: 0.40   # SWIR-2
+    }
 
-        if USE_RASTERIO:
-            with rasterio.open(band_files[r_band]) as src_r,                  rasterio.open(band_files[g_band]) as src_g,                  rasterio.open(band_files[b_band]) as src_b:
-                 r = scale_band_to_8bit(src_r.read(1), ref_info["nodata"])
-                 g = scale_band_to_8bit(src_g.read(1), ref_info["nodata"])
-                 b = scale_band_to_8bit(src_b.read(1), ref_info["nodata"])
-        else:
-            ds_r = gdal.Open(band_files[r_band], gdal.GA_ReadOnly)
-            ds_g = gdal.Open(band_files[g_band], gdal.GA_ReadOnly)
-            ds_b = gdal.Open(band_files[b_band], gdal.GA_ReadOnly)
-            r = scale_band_to_8bit(ds_r.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
-            g = scale_band_to_8bit(ds_g.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
-            b = scale_band_to_8bit(ds_b.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
+    try:
+        from PIL import Image
+    except ImportError:
+        Image = None
 
-            ds_r = ds_g = ds_b = None
+    if USE_RASTERIO:
+        with rasterio.open(output_file) as ds:
+            stretched_cache = {}
+            for filename, (r_idx, g_idx, b_idx, desc) in composites.items():
+                print(f"  Rendering {desc} -> {filename}...")
+                for idx in (r_idx, g_idx, b_idx):
+                    if idx not in stretched_cache:
+                        stretched_cache[idx] = stretch_band_erdas_style(
+                            ds.read(idx),
+                            max_refl=band_refl_limits.get(idx, 0.30)
+                        )
 
-        saved = False
+                r = stretched_cache[r_idx]
+                g = stretched_cache[g_idx]
+                b = stretched_cache[b_idx]
+                out_path = os.path.join(output_dir, filename)
 
-        try:
-            from PIL import Image
-            rgb_array = np.dstack([r, g, b])
-            img = Image.fromarray(rgb_array)
-            img.save(preview_file)
-            saved = True
-        except Exception:
-            pass
+                if Image:
+                    Image.fromarray(np.dstack([r, g, b])).save(out_path)
+                else:
+                    with rasterio.open(
+                        out_path, "w", driver="PNG",
+                        width=ds.width, height=ds.height, count=3, dtype="uint8"
+                    ) as dst:
+                        dst.write(r, 1)
+                        dst.write(g, 2)
+                        dst.write(b, 3)
+                print(f"  [OK] Saved: {filename}")
+    else:
+        out_ds = gdal.Open(output_file, gdal.GA_ReadOnly)
+        if out_ds:
+            stretched_cache = {}
+            for filename, (r_idx, g_idx, b_idx, desc) in composites.items():
+                print(f"  Rendering {desc} -> {filename}...")
+                for idx in (r_idx, g_idx, b_idx):
+                    if idx not in stretched_cache:
+                        stretched_cache[idx] = stretch_band_erdas_style(out_ds.GetRasterBand(idx).ReadAsArray())
 
-        if saved:
-            print(f"[OK] {desc} -> output/{filename}")
-        else:
-            print(f"[WARNING] Could not save {filename}")
+                r = stretched_cache[r_idx]
+                g = stretched_cache[g_idx]
+                b = stretched_cache[b_idx]
+                out_path = os.path.join(output_dir, filename)
+
+                if Image:
+                    Image.fromarray(np.dstack([r, g, b])).save(out_path)
+                else:
+                    png_driver = gdal.GetDriverByName("PNG")
+                    if png_driver:
+                        p_ds = png_driver.Create(out_path, out_ds.RasterXSize, out_ds.RasterYSize, 3, gdal.GDT_Byte)
+                        p_ds.GetRasterBand(1).WriteArray(r)
+                        p_ds.GetRasterBand(2).WriteArray(g)
+                        p_ds.GetRasterBand(3).WriteArray(b)
+                        p_ds = None
+                print(f"  [OK] Saved: {filename}")
+            out_ds = None
+
+
 def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
     """
     Creates an ERDAS Imagine .img stacked raster from bands 1 to 7 using HFA driver.
@@ -427,9 +663,17 @@ def main():
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_dir = os.path.join(base_dir, "input")
+    processing_dir = os.path.join(base_dir, "processing")
     output_dir = os.path.join(base_dir, "output")
     output_file = os.path.join(output_dir, "Landsat_Stacked.img")
-    preview_file = os.path.join(output_dir, "Landsat_TrueColor_Preview.png")
+
+    # List of all 4 generated preview PNGs
+    preview_files = [
+        os.path.join(output_dir, "Landsat_TrueColor_Preview.png"),
+        os.path.join(output_dir, "Landsat_FalseColor_NIR_Preview.png"),
+        os.path.join(output_dir, "Landsat_Agriculture_Preview.png"),
+        os.path.join(output_dir, "Landsat_Urban_Preview.png")
+    ]
 
     # Create folders if missing
     os.makedirs(output_dir, exist_ok=True)
@@ -451,10 +695,9 @@ def main():
             sys.exit(0)
 
         try:
-            # Delete output file, preview PNG, and any associated sidecars (.aux.xml, .rrd, .ige, .ovr, .aux)
             base_path = os.path.splitext(output_file)[0]
             sidecar_exts = [".aux.xml", ".rrd", ".ige", ".ovr", ".aux"]
-            files_to_remove = [output_file, preview_file]
+            files_to_remove = [output_file] + preview_files
             for ext in sidecar_exts:
                 files_to_remove.append(output_file + ext)
                 files_to_remove.append(base_path + ext)
@@ -470,9 +713,14 @@ def main():
             print(f"ERROR: Could not delete existing output file or sidecars: {e}")
             sys.exit(1)
 
-    print("\nSearching input folder...\n")
-    band_files = find_bands(input_dir)
+    # Step 1: Extract any archives (.rar, .zip, .tar, etc.) from input/ and copy B1-B7 into processing/
+    prepare_processing_folder(input_dir, processing_dir)
 
+    # Step 2: Read validated band files from processing/
+    print("Searching processing folder...\n")
+    band_files = find_bands(processing_dir)
+
+    # Step 3: Validate, stack, verify (original sensitive algorithm untouched)
     ref_info = validate_bands(band_files)
 
     create_stack(band_files, output_file, ref_info, scale_to_8bit=False)
@@ -481,15 +729,20 @@ def main():
 
     check_data_integrity(band_files, output_file)
 
-    create_multi_composites(band_files, output_dir, ref_info)
+    # Step 4: Generate all 4 ERDAS-quality full-color preview composites
+    create_all_previews(output_file, output_dir)
 
     print("\n========================================")
     print("SUCCESS")
     print("========================================")
     print(f"\nCreated:")
     print(f"  - Raster Stack  : output/Landsat_Stacked.img")
-    print(f"  - Color Preview : output/Landsat_TrueColor_Preview.png\n")
+    print(f"  - True Color    : output/Landsat_TrueColor_Preview.png (Bands 4-3-2)")
+    print(f"  - False Color   : output/Landsat_FalseColor_NIR_Preview.png (Bands 5-4-3)")
+    print(f"  - Agriculture   : output/Landsat_Agriculture_Preview.png (Bands 6-5-2)")
+    print(f"  - Urban / SWIR  : output/Landsat_Urban_Preview.png (Bands 7-6-4)\n")
 
 
 if __name__ == "__main__":
     main()
+
