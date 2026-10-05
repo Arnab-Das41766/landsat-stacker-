@@ -165,36 +165,30 @@ def validate_bands(band_files):
 def scale_band_to_8bit(data_array, nodata_val):
     """
     Scales 16-bit raw Landsat surface reflectance values to 8-bit (0-255)
-    using robust contrast stretch for INSTANT vivid true-color rendering.
-    Filters out background nodata and saturated cloud pixels so land features remain bright and colorful.
+    using 2%-98% percentile stretch and gamma correction for vivid natural true-color rendering.
     """
     nodata_mask = (data_array == nodata_val) | (data_array == 0)
-    valid_pixels = data_array[~nodata_mask]
+    valid_mask = ~nodata_mask
 
-    if not np.any(valid_pixels):
+    if not np.any(valid_mask):
         return np.zeros_like(data_array, dtype=np.uint8)
 
     if data_array.dtype == np.uint8:
         return data_array
 
-    # Filter out saturated cloud pixels (DN >= 22000 in Landsat C2 L2 SR) for contrast upper percentile calculation
-    land_mask = ~nodata_mask & (data_array < 22000)
-    land_pixels = data_array[land_mask]
+    # Convert Landsat C2 L2 DN to Surface Reflectance
+    sr = np.maximum(0, (data_array.astype(np.float32) * 0.0000275) - 0.2)
+    valid_sr = sr[valid_mask]
 
-    if not np.any(land_pixels):
-        land_pixels = valid_pixels
-
-    p2 = float(np.percentile(land_pixels, 2))
-    p98 = float(np.percentile(land_pixels, 98))
-
+    p2, p98 = np.percentile(valid_sr, [2, 98])
     if p98 <= p2:
         p98 = p2 + 1.0
 
-    scaled = ((data_array.astype(np.float32) - p2) / (p98 - p2)) * 254.0 + 1.0
-    scaled = np.clip(scaled, 1, 255)
-    scaled[nodata_mask] = 0
+    stretched = np.clip((sr - p2) / (p98 - p2), 0, 1)
+    gamma_corrected = np.power(stretched, 0.45)
+    gamma_corrected[nodata_mask] = 0
 
-    return scaled.astype(np.uint8)
+    return (gamma_corrected * 255.0).astype(np.uint8)
 
 
 def create_rgb_preview(band_files, preview_file, ref_info):
@@ -296,9 +290,7 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
             "height": ref_info["height"],
             "dtype": out_dtype,
             "crs": ref_info["crs"],
-            "transform": ref_info["transform"],
-            "nodata": 0,
-            "STATISTICS": "YES"
+            "transform": ref_info["transform"]
         }
 
         with rasterio.open(output_file, "w", **profile) as dst:
@@ -313,15 +305,7 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
 
                     dst.write(out_data, b)
 
-                dst.update_tags(b, STATISTICS_EXCLUDEDVALUES="0")
                 print(f"[OK] B{b} -> Output Band {b}")
-
-            print("\nComputing band statistics...")
-            try:
-                dst.stats(indexes=list(range(1, 8)), approx=False)
-            except Exception:
-                for b in range(1, 8):
-                    dst.statistics(b, approx=False)
 
             print("Building overviews...")
             dst.build_overviews([2, 4, 8, 16], Resampling.average)
@@ -339,8 +323,7 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
             ref_info["width"],
             ref_info["height"],
             7,
-            gdal_dtype,
-            options=["STATISTICS=YES"]
+            gdal_dtype
         )
 
         if not out_ds:
@@ -359,19 +342,13 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
             data = in_band.ReadAsArray()
             out_band = out_ds.GetRasterBand(b)
 
-            out_band.SetNoDataValue(0)
-
             if scale_to_8bit:
                 out_data = scale_band_to_8bit(data, ref_info["nodata"])
             else:
                 out_data = data
 
             out_band.WriteArray(out_data)
-            out_band.SetMetadataItem("STATISTICS_EXCLUDEDVALUES", "0")
             out_band.FlushCache()
-
-            out_band.ComputeStatistics(False)
-
             in_ds = None
 
             print(f"[OK] B{b} -> Output Band {b}")
@@ -385,8 +362,7 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
 
 def verify_output(output_file, expected_info):
     """
-    Verifies that output exists, matches expected band count, dimensions, CRS, geotransform,
-    nodata, and has stored band statistics.
+    Verifies that output exists, matches expected band count, dimensions, CRS, and geotransform.
     """
     print("\nVerifying output...\n")
 
@@ -416,19 +392,6 @@ def verify_output(output_file, expected_info):
                 sys.exit(1)
             print("[OK] Geotransform")
 
-            if out_ds.nodata is None:
-                print("ERROR: NoData value is not set on output raster.")
-                sys.exit(1)
-            print("[OK] NoData value")
-
-            for b in range(1, 8):
-                tags = out_ds.tags(b)
-                if not ("STATISTICS_MINIMUM" in tags or "STATISTICS_MAXIMUM" in tags):
-                    print(f"ERROR: Band {b} lacks stored statistics tags!")
-                    sys.exit(1)
-
-            print("[OK] Stored Statistics")
-
     else:
         out_ds = gdal.Open(output_file, gdal.GA_ReadOnly)
         if not out_ds:
@@ -454,21 +417,6 @@ def verify_output(output_file, expected_info):
             print("ERROR: Missing geotransform in output raster.")
             sys.exit(1)
         print("[OK] Geotransform")
-
-        for b in range(1, 8):
-            band = out_ds.GetRasterBand(b)
-            if band.GetNoDataValue() is None:
-                print(f"ERROR: NoData value is not set on Band {b}!")
-                sys.exit(1)
-            meta = band.GetMetadata()
-            if "STATISTICS_MINIMUM" not in meta:
-                stats = band.GetStatistics(False, False)
-                if stats is None:
-                    print(f"ERROR: Band {b} lacks stored statistics!")
-                    sys.exit(1)
-
-        print("[OK] NoData value")
-        print("[OK] Stored Statistics")
 
         out_ds = None
 
