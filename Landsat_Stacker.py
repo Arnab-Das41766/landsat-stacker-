@@ -192,83 +192,56 @@ def scale_band_to_8bit(data_array, nodata_val):
     return (gamma_corrected * 255.0).astype(np.uint8)
 
 
-def create_rgb_preview(band_files, preview_file, ref_info):
+def create_multi_composites(band_files, output_dir, ref_info):
     """
-    Creates a 3-band True Color (RGB: Bands 4, 3, 2) PNG image for instant viewing
-    in standard photo viewers without needing GIS software.
+    V2 Feature: Generates 4 standard remote sensing multi-spectral PNG previews:
+      1. True Color (RGB 4-3-2): Natural human-eye view.
+      2. Standard Infrared FCC (RGB 5-4-3): Bright red vegetation.
+      3. Agriculture & Crop Moisture (RGB 6-5-2): Soil and crop health.
+      4. Urban & Built-Up (RGB 7-6-4): Infrastructure and building density.
     """
-    print("\nGenerating True-Color RGB PNG Preview (Bands 4-3-2)...")
+    print("\nGenerating Multi-Composite PNG Previews...")
 
-    if USE_RASTERIO:
-        with rasterio.open(band_files[4]) as src4, \
-             rasterio.open(band_files[3]) as src3, \
-             rasterio.open(band_files[2]) as src2:
-            r = scale_band_to_8bit(src4.read(1), ref_info["nodata"])
-            g = scale_band_to_8bit(src3.read(1), ref_info["nodata"])
-            b = scale_band_to_8bit(src2.read(1), ref_info["nodata"])
-    else:
-        ds4 = gdal.Open(band_files[4], gdal.GA_ReadOnly)
-        ds3 = gdal.Open(band_files[3], gdal.GA_ReadOnly)
-        ds2 = gdal.Open(band_files[2], gdal.GA_ReadOnly)
+    composites = {
+        "Landsat_TrueColor_Preview.png": (4, 3, 2, "True Color (RGB 4-3-2)"),
+        "Landsat_FalseColor_NIR_Preview.png": (5, 4, 3, "Standard Infrared FCC (RGB 5-4-3)"),
+        "Landsat_Agriculture_Preview.png": (6, 5, 2, "Agriculture (RGB 6-5-2)"),
+        "Landsat_Urban_Preview.png": (7, 6, 4, "Urban & Built-Up (RGB 7-6-4)")
+    }
 
-        r = scale_band_to_8bit(ds4.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
-        g = scale_band_to_8bit(ds3.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
-        b = scale_band_to_8bit(ds2.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
+    for filename, (r_band, g_band, b_band, desc) in composites.items():
+        preview_file = os.path.join(output_dir, filename)
 
-        ds4 = ds3 = ds2 = None
+        if USE_RASTERIO:
+            with rasterio.open(band_files[r_band]) as src_r,                  rasterio.open(band_files[g_band]) as src_g,                  rasterio.open(band_files[b_band]) as src_b:
+                 r = scale_band_to_8bit(src_r.read(1), ref_info["nodata"])
+                 g = scale_band_to_8bit(src_g.read(1), ref_info["nodata"])
+                 b = scale_band_to_8bit(src_b.read(1), ref_info["nodata"])
+        else:
+            ds_r = gdal.Open(band_files[r_band], gdal.GA_ReadOnly)
+            ds_g = gdal.Open(band_files[g_band], gdal.GA_ReadOnly)
+            ds_b = gdal.Open(band_files[b_band], gdal.GA_ReadOnly)
+            r = scale_band_to_8bit(ds_r.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
+            g = scale_band_to_8bit(ds_g.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
+            b = scale_band_to_8bit(ds_b.GetRasterBand(1).ReadAsArray(), ref_info["nodata"])
 
-    saved = False
+            ds_r = ds_g = ds_b = None
 
-    # Method 1: PIL / Pillow
-    try:
-        from PIL import Image
-        rgb_array = np.dstack([r, g, b])
-        img = Image.fromarray(rgb_array)
-        img.save(preview_file)
-        saved = True
-    except Exception:
-        pass
+        saved = False
 
-    # Method 2: Rasterio PNG driver
-    if not saved and USE_RASTERIO:
         try:
-            with rasterio.open(
-                preview_file,
-                "w",
-                driver="PNG",
-                width=ref_info["width"],
-                height=ref_info["height"],
-                count=3,
-                dtype="uint8"
-            ) as dst:
-                dst.write(r, 1)
-                dst.write(g, 2)
-                dst.write(b, 3)
+            from PIL import Image
+            rgb_array = np.dstack([r, g, b])
+            img = Image.fromarray(rgb_array)
+            img.save(preview_file)
             saved = True
         except Exception:
             pass
 
-    # Method 3: GDAL PNG driver
-    if not saved and USE_GDAL:
-        try:
-            png_driver = gdal.GetDriverByName("PNG")
-            if png_driver:
-                out_ds = png_driver.Create(preview_file, ref_info["width"], ref_info["height"], 3, gdal.GDT_Byte)
-                out_ds.GetRasterBand(1).WriteArray(r)
-                out_ds.GetRasterBand(2).WriteArray(g)
-                out_ds.GetRasterBand(3).WriteArray(b)
-                out_ds = None
-                saved = True
-        except Exception:
-            pass
-
-    if saved:
-        print(f"[OK] Saved preview: {os.path.basename(preview_file)}")
-    else:
-        print("[WARNING] Could not save PNG preview image.")
-
-
-
+        if saved:
+            print(f"[OK] {desc} -> output/{filename}")
+        else:
+            print(f"[WARNING] Could not save {filename}")
 def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
     """
     Creates an ERDAS Imagine .img stacked raster from bands 1 to 7 using HFA driver.
@@ -508,7 +481,7 @@ def main():
 
     check_data_integrity(band_files, output_file)
 
-    create_rgb_preview(band_files, preview_file, ref_info)
+    create_multi_composites(band_files, output_dir, ref_info)
 
     print("\n========================================")
     print("SUCCESS")
