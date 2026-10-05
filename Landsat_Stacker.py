@@ -13,6 +13,7 @@ try:
     USE_RASTERIO = True
 except ImportError:
     try:
+        # pyrefly: ignore [missing-import]
         from osgeo import gdal, osr
         gdal.UseExceptions()
         USE_GDAL = True
