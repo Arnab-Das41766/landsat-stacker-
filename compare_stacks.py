@@ -12,9 +12,12 @@ except ImportError:
 try:
     import matplotlib.pyplot as plt
 except ImportError:
-    print("ERROR: 'matplotlib' package is required to save RGB preview.")
-    print("Please install it using: pip install matplotlib")
-    sys.exit(1)
+    plt = None
+
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 
 def compare(path1, path2):
@@ -82,15 +85,22 @@ def compare(path1, path2):
 
         rgb = np.dstack([r, g, b])
 
-        fig, ax = plt.subplots(figsize=(10, 10))
-        ax.imshow(rgb)
-        ax.set_title("True Colour Composite (Bands 4-3-2) Preview - 2% to 98% Stretch")
-        ax.axis("off")
+        if plt is not None:
+            fig, ax = plt.subplots(figsize=(10, 10))
+            ax.imshow(rgb)
+            ax.set_title("True Colour Composite (Bands 4-3-2) Preview - 2% to 98% Stretch")
+            ax.axis("off")
 
-        output_png = "preview.png"
-        plt.savefig(output_png, bbox_inches="tight", dpi=150)
-        plt.close(fig)
-        print(f"[OK] RGB preview saved as '{output_png}'.\n")
+            output_png = "preview.png"
+            plt.savefig(output_png, bbox_inches="tight", dpi=150)
+            plt.close(fig)
+            print(f"[OK] RGB preview saved as '{output_png}'.\n")
+        elif Image is not None:
+            rgb_8u = (rgb * 255).astype(np.uint8)
+            img = Image.fromarray(rgb_8u)
+            output_png = "preview.png"
+            img.save(output_png)
+            print(f"[OK] RGB preview saved as '{output_png}'.\n")
 
 
 if __name__ == "__main__":

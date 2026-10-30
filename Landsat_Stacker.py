@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import re
 import shutil
@@ -17,6 +17,7 @@ try:
     USE_RASTERIO = True
 except ImportError:
     try:
+        # pyrefly: ignore [missing-import]
         from osgeo import gdal, osr
         gdal.UseExceptions()
         USE_GDAL = True
@@ -481,6 +482,8 @@ def create_all_previews(output_file, output_dir):
 def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
     """
     Creates an ERDAS Imagine .img stacked raster from bands 1 to 7 using HFA driver.
+    Embeds ERDAS-compliant statistics, histograms, and excluded zero (nodata) tags
+    so ERDAS IMAGINE displays the image with full contrast and rich colors automatically.
 
     Note on Band Ordering & True Colour Composites:
     - Output band N directly corresponds to Landsat input Band N (Band 1 -> B1, Band 2 -> B2, ..., Band 7 -> B7).
@@ -491,6 +494,7 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
     print(f"\nCreating stacked image ({'8-bit Color Display Stretched' if scale_to_8bit else '16-bit Raw Data'})...\n")
 
     out_dtype = "uint8" if scale_to_8bit else ref_info["datatype"]
+    nodata_val = 0 if not scale_to_8bit else None
 
     if USE_RASTERIO:
         profile = {
@@ -500,7 +504,8 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
             "height": ref_info["height"],
             "dtype": out_dtype,
             "crs": ref_info["crs"],
-            "transform": ref_info["transform"]
+            "transform": ref_info["transform"],
+            "nodata": nodata_val
         }
 
         with rasterio.open(output_file, "w", **profile) as dst:
@@ -515,10 +520,42 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
 
                     dst.write(out_data, b)
 
-                print(f"[OK] B{b} -> Output Band {b}")
+                    # Compute and embed ERDAS-compliant statistics & histogram
+                    valid = out_data[out_data > 0]
+                    if np.any(valid):
+                        b_min = int(np.min(valid))
+                        b_max = int(np.max(valid))
+                        b_mean = float(np.mean(valid))
+                        b_std = float(np.std(valid))
+                        b_median = int(np.median(valid))
+                        counts = np.bincount(valid)
+                        b_mode = int(np.argmax(counts))
+
+                        histo_counts = counts[b_min:b_max + 1]
+                        histo_str = "|".join(map(str, histo_counts))
+
+                        dst.update_tags(
+                            b,
+                            STATISTICS_MINIMUM=str(b_min),
+                            STATISTICS_MAXIMUM=str(b_max),
+                            STATISTICS_MEAN=f"{b_mean:.10f}",
+                            STATISTICS_STDDEV=f"{b_std:.10f}",
+                            STATISTICS_MEDIAN=str(b_median),
+                            STATISTICS_MODE=str(b_mode),
+                            STATISTICS_HISTONUMBINS=str(len(histo_counts)),
+                            STATISTICS_HISTOMIN=str(b_min),
+                            STATISTICS_HISTOMAX=str(b_max),
+                            STATISTICS_SKIPFACTORX="1",
+                            STATISTICS_SKIPFACTORY="1",
+                            STATISTICS_EXCLUDEDVALUES="0",
+                            LAYER_TYPE="athematic",
+                            STATISTICS_HISTOBINVALUES=histo_str
+                        )
+
+                print(f"[OK] B{b} -> Output Band {b} (Statistics & Histograms embedded)")
 
             print("Building overviews...")
-            dst.build_overviews([2, 4, 8, 16], Resampling.average)
+            dst.build_overviews([2, 4, 8, 16, 32, 64], Resampling.average)
 
     else:
         driver = gdal.GetDriverByName("HFA")
@@ -558,13 +595,37 @@ def create_stack(band_files, output_file, ref_info, scale_to_8bit=False):
                 out_data = data
 
             out_band.WriteArray(out_data)
+            out_band.SetNoDataValue(0)
+
+            valid = out_data[out_data > 0]
+            if np.any(valid):
+                b_min = float(np.min(valid))
+                b_max = float(np.max(valid))
+                b_mean = float(np.mean(valid))
+                b_std = float(np.std(valid))
+                out_band.SetStatistics(b_min, b_max, b_mean, b_std)
+                out_band.SetMetadataItem("STATISTICS_EXCLUDEDVALUES", "0")
+                out_band.SetMetadataItem("LAYER_TYPE", "athematic")
+
+                counts = np.bincount(valid)
+                b_min_int = int(b_min)
+                b_max_int = int(b_max)
+                histo_counts = counts[b_min_int:b_max_int + 1]
+                histo_str = "|".join(map(str, histo_counts))
+                out_band.SetMetadataItem("STATISTICS_HISTOBINVALUES", histo_str)
+                out_band.SetMetadataItem("STATISTICS_HISTONUMBINS", str(len(histo_counts)))
+                out_band.SetMetadataItem("STATISTICS_HISTOMIN", str(b_min_int))
+                out_band.SetMetadataItem("STATISTICS_HISTOMAX", str(b_max_int))
+                out_band.SetMetadataItem("STATISTICS_SKIPFACTORX", "1")
+                out_band.SetMetadataItem("STATISTICS_SKIPFACTORY", "1")
+
             out_band.FlushCache()
             in_ds = None
 
-            print(f"[OK] B{b} -> Output Band {b}")
+            print(f"[OK] B{b} -> Output Band {b} (Statistics & Histograms embedded)")
 
         print("\nBuilding overviews...")
-        out_ds.BuildOverviews("AVERAGE", [2, 4, 8, 16])
+        out_ds.BuildOverviews("AVERAGE", [2, 4, 8, 16, 32, 64])
 
         out_ds.FlushCache()
         out_ds = None
